@@ -1,0 +1,19 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "rc-cad-handoff"
+version = "0.1.0"
+description = "Independent consumer for RcCadHandoffV1 reinforced-concrete detailing handoffs: exact solids, STEP/GLB, and an OCCT cross-check review."
+requires-python = ">=3.12"
+dependencies = [
+  "cadpy",
+]
+
+[project.scripts]
+rc-cad-handoff = "rc_cad_handoff.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+include = ["rc_cad_handoff*"]

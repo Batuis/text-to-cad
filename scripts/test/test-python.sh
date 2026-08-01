@@ -10,6 +10,7 @@ cd "$REPO_ROOT"
 
 run_python_unittest "cadpy package Python tests" "tests/python/packages/cadpy" "packages/cadpy/src"
 run_python_unittest "cadpy_metadata package Python tests" "tests/python/packages/cadpy_metadata" "packages/cadpy_metadata/src"
+run_python_unittest "rc_cad_handoff package Python tests" "tests/python/packages/rc_cad_handoff" "packages/rc_cad_handoff/src" "packages/cadpy/src"
 
 while IFS= read -r skill; do
   test_dir="tests/python/skills/$skill"
