@@ -22,7 +22,10 @@ class ReviewIdentityTest(unittest.TestCase):
     def test_names_its_own_format_and_the_source_contract(self) -> None:
         review = _review()
         self.assertEqual(review["reviewFormat"], REVIEW_FORMAT)
-        self.assertEqual(review["reviewFormatVersion"], 1)
+        # 2 since the review began declaring the unit of every pipeline
+        # boundary. The producer's contract is a separate thing and did not
+        # move: RcCadHandoffV1 is still schema version 1.
+        self.assertEqual(review["reviewFormatVersion"], 2)
         self.assertEqual(review["source"]["contract"], CONTRACT)
         self.assertEqual(review["source"]["schemaVersion"], 1)
 

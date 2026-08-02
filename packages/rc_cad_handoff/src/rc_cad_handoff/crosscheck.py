@@ -56,6 +56,31 @@ CONTACT_TOL_M = 1e-9
 #: A common volume this small is indistinguishable from a tangential contact.
 COMMON_VOLUME_TOL_M3 = 1e-12
 
+#: Stable identity for "OCCT's common-volume boolean is degenerate here".
+#:
+#: One geometric computation can be reached from more than one check — the
+#: interface tie is measured once and reported under both the cover and the
+#: containment requirement — and a reader counting issue records would
+#: otherwise see two independent geometry failures where there is one. Records
+#: sharing a ``causeId`` share a single underlying computation.
+CAUSE_DEGENERATE_COMMON_BOOLEAN = "cause:numericalLimitation:degenerateCommonBoolean"
+
+
+def bar_pair_cause_id(bar_a: str, bar_b: str) -> str:
+    """Deterministic id for a degenerate boolean between two bars."""
+    first, second = sorted((bar_a, bar_b))
+    return f"{CAUSE_DEGENERATE_COMMON_BOOLEAN}:pair:{first}|{second}"
+
+
+def bar_body_cause_id(bar_id: str, body_id: str) -> str:
+    """Deterministic id for a degenerate boolean between a bar and a body.
+
+    Deliberately independent of the check that reached it: the cover check and
+    the containment check both clip this bar against this body, and it is the
+    same boolean both times.
+    """
+    return f"{CAUSE_DEGENERATE_COMMON_BOOLEAN}:barBody:{bar_id}|{body_id}"
+
 
 def _distance(a: TopoDS_Shape, b: TopoDS_Shape) -> float | None:
     op = BRepExtrema_DistShapeShape(a, b)
@@ -140,12 +165,21 @@ def observe_pair(
         and common.volume is not None
         and common.volume <= COMMON_VOLUME_TOL_M3
     ):
-        # Coincident or tangent surfaces make BRepAlgoAPI_Common degenerate.
+        # Near-tangential surfaces make BRepAlgoAPI_Common degenerate.
         # Reporting CONTACT on that basis would contradict an exact measurement.
+        #
+        # These bars are not collinear. Their legs are coplanar arcs that leave
+        # the same elevation tangent to horizontal, curve in opposite
+        # directions and cross at a shallow angle, so the two tube surfaces
+        # meet near-tangentially. Bars that *are* collinear and exactly
+        # coincident over a long run — the F1-C1-dowel-0/1 family — boolean
+        # cleanly, which is why the earlier "coincident centrelines" wording
+        # named the wrong cause.
         notes.append(
             "intersection volume returned zero for surfaces the exact distance shows "
-            "interpenetrating; the boolean is degenerate for coincident centrelines and its "
-            "volume is not used to classify this pair"
+            "interpenetrating; near-tangential coplanar arc crossing, so exact centreline "
+            "classification is available while the OCCT common-volume boolean is numerically "
+            "degenerate, and its volume is not used to classify this pair"
         )
     if not common.ok and common.note:
         notes.append(common.note)
@@ -532,10 +566,11 @@ def cross_check(handoff: Handoff, model: RealisedModel) -> CrossCheckResult:
                 }
             )
         for note in observation.notes:
-            if "boolean is degenerate" in note:
+            if "boolean is numerically degenerate" in note:
                 issues.append(
                     {
                         "kind": str(IssueKind.NUMERICAL_LIMITATION),
+                        "causeId": bar_pair_cause_id(observation.bar_id_a, observation.bar_id_b),
                         "barIdA": observation.bar_id_a,
                         "barIdB": observation.bar_id_b,
                         "detail": note,
@@ -565,9 +600,13 @@ def cross_check(handoff: Handoff, model: RealisedModel) -> CrossCheckResult:
         for bar_observation in observation.bars:
             for note in bar_observation.notes:
                 if "boolean is degenerate" in note or "boolean returned an empty result" in note:
+                    # Same bar, same body, same boolean under every check that
+                    # scopes to it — so the same causeId, and a reader can tell
+                    # two check contexts from two geometry failures.
                     issues.append(
                         {
                             "kind": str(IssueKind.NUMERICAL_LIMITATION),
+                            "causeId": bar_body_cause_id(bar_observation.bar_id, observation.body_id),
                             "requirementId": observation.requirement_id,
                             "checkId": observation.check_id,
                             "barIdA": bar_observation.bar_id,

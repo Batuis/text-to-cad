@@ -23,14 +23,18 @@ import json
 from pathlib import Path
 from typing import Any
 
-from .artifacts import ArtifactSet
+from .artifacts import ArtifactSet, unit_contract
 from .crosscheck import AGREEMENT_BAND_M, CONTACT_TOL_M, CrossCheckResult
 from .geometry import RealisedModel
 from .manifest import CONTRACT, Handoff
 from .status import Comparison, IssueKind, Provenance, Realisation
 
 REVIEW_FORMAT = "RcCadReviewV1"
-REVIEW_FORMAT_VERSION = 1
+#: 2 adds ``units.boundaries`` (the physical unit of every pipeline boundary,
+#: including the STEP and GLB artifacts) and ``issues[].causeId`` (a stable
+#: identity shared by records that arise from one geometric computation).
+#: ``RcCadHandoffV1`` is untouched and remains schema version 1.
+REVIEW_FORMAT_VERSION = 2
 
 #: Length tolerance above which a realised arc is reported as deviating from the
 #: producer's nominal bend parameters. Matches the agreement band.
@@ -104,11 +108,17 @@ def build_review(
                 "completeness": handoff.assembly_completeness,
             },
         },
+        # Format 2 states the unit of every boundary, not just of its own
+        # numbers. Format 1 declared what the review meant and said nothing
+        # about what the STEP and GLB physically contained, which is how both
+        # artifacts shipped a thousand times undersized while every value in
+        # this document stayed correct.
         "units": {
             "length": "m",
             "angle": "deg",
             "barDiameter": "mm",
             "volume": "m3",
+            "boundaries": unit_contract(),
         },
         "tolerances": {
             "agreementBandM": AGREEMENT_BAND_M,
@@ -130,7 +140,9 @@ def build_review(
                     "note": (
                         "GLB is Y-up by glTF convention; the Z-up to Y-up conversion is applied "
                         "on the CAD side by cadpy's native writer and declared here. The manifest "
-                        "and every measurement in this review remain Z-up."
+                        "and every measurement in this review remain Z-up. The conversion is an "
+                        "orthonormal axis swap and carries no scale; the scale is stated "
+                        "separately in units.boundaries."
                     )
                 },
             }
@@ -452,6 +464,7 @@ def _issues(result: CrossCheckResult) -> list[dict[str, Any]]:
     def key(issue: dict[str, Any]) -> tuple[str, ...]:
         return (
             str(issue.get("kind", "")),
+            str(issue.get("causeId", "")),
             str(issue.get("barIdA", "")),
             str(issue.get("barIdB", "")),
             str(issue.get("code", "")),
@@ -467,6 +480,15 @@ def _summary(handoff: Handoff, model: RealisedModel, result: CrossCheckResult) -
     agreements = [p for p in reported if p.comparison is Comparison.AGREEMENT]
     disagreements = [p for p in reported if p.comparison is Comparison.DISAGREEMENT]
     worst = max((p.delta for p in reported if p.delta is not None), default=None)
+
+    # Two counts, because they answer different questions. A record is one
+    # (check, geometry) pair; a cause is one geometric computation. The
+    # interface tie is measured once and reported under both the cover and the
+    # containment check, so the record count is 2 and the cause count is 1.
+    # Reporting only the record count invites a reader to conclude there are
+    # two independent geometry failures.
+    numerical = [i for i in result.issues if i.get("kind") == str(IssueKind.NUMERICAL_LIMITATION)]
+    distinct_causes = {str(i.get("causeId")) for i in numerical if i.get("causeId")}
     return {
         "concreteComponents": len(model.concrete),
         "barSolids": len(model.bars),
@@ -483,6 +505,8 @@ def _summary(handoff: Handoff, model: RealisedModel, result: CrossCheckResult) -
         "unreportedClosePairCount": len(result.unreported_pairs),
         "outOfScopeCheckCount": len(result.out_of_scope),
         "notEvaluatedCheckCount": len(result.not_evaluated),
+        "numericalLimitationRecordCount": len(numerical),
+        "numericalLimitationDistinctCauseCount": len(distinct_causes),
         "unsupportedConditionCount": len(handoff.unsupported),
         "blockedByUnsupportedConditions": bool(handoff.unsupported),
         "cleanPass": False,

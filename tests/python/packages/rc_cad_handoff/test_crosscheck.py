@@ -83,11 +83,17 @@ class IndependentClassificationTest(unittest.TestCase):
                 self.assertLess(observation.cad_clearance, 0.0)
 
     def test_records_the_degenerate_boolean_rather_than_misclassifying(self) -> None:
-        """Coincident centrelines make the intersection volume unreliable.
+        """Near-tangential surfaces make the intersection volume unreliable.
 
-        Two pairs interpenetrate along exactly coincident centrelines, where
-        OCCT's boolean returns an empty result. The classification must come from
-        the exact distance, and the numerical limitation must be recorded.
+        Two pairs of dowel legs are coplanar arcs that leave the same elevation
+        tangent to horizontal, curve in opposite directions and cross at a
+        shallow angle. OCCT's boolean returns an empty result for that
+        near-tangential meeting. The classification must come from the exact
+        centreline distance, and the numerical limitation must be recorded.
+
+        Not to be confused with collinear bars: the pairs that overlap along
+        exactly coincident centrelines boolean cleanly, and are covered by
+        ``test_most_pairs_do_produce_a_positive_intersection_volume``.
         """
         degenerate = [
             o
@@ -101,7 +107,13 @@ class IndependentClassificationTest(unittest.TestCase):
             with self.subTest(pair=(observation.bar_id_a, observation.bar_id_b)):
                 # Still classified as interpenetrating, from the exact measurement.
                 self.assertIs(observation.classification, Collision.INTERSECTING)
-                self.assertTrue(any("boolean is degenerate" in n for n in observation.notes))
+                notes = " ".join(observation.notes)
+                self.assertIn("numerically degenerate", notes)
+                # The cause must be named accurately: these arcs cross, they
+                # are not collinear, and calling them coincident sent a reader
+                # looking at the wrong geometry.
+                self.assertIn("near-tangential coplanar arc crossing", notes)
+                self.assertNotIn("degenerate for coincident centrelines", notes)
 
     def test_most_pairs_do_produce_a_positive_intersection_volume(self) -> None:
         positive = [

@@ -361,9 +361,9 @@ Output — `tmp/` is disposable, untracked (`.gitignore`), and safe to delete at
 
 | File | Bytes |
 |---|---|
-| `tmp/rc-cad-handoff/rc-cad-Z1-det3-dem2.step` | 347,551 |
-| `tmp/rc-cad-handoff/rc-cad-Z1-det3-dem2.glb` | 1,964,408 |
-| `tmp/rc-cad-handoff/cad-review.json` | 107,024 |
+| `tmp/rc-cad-handoff/rc-cad-Z1-det3-dem2.step` | 346,122 |
+| `tmp/rc-cad-handoff/rc-cad-Z1-det3-dem2.glb` | 1,964,080 |
+| `tmp/rc-cad-handoff/cad-review.json` | 108,586 |
 
 **None of these are committed.** `AGENTS.md` requires permanent CAD artifacts to live under
 `models/`; these are a throwaway review run, not durable fixtures, so they go to `tmp/` and are
@@ -371,8 +371,12 @@ regenerated on demand instead of being tracked.
 
 Determinism, reconfirmed on two runs: the GLB is byte-identical; the STEP differs only in its
 ISO-10303-21 `FILE_NAME` timestamp, with `contentSha256` stable at
-`db6ac10558b0eaea4f5ca466b7f32149af07350945cda411606bd1450d510187`; `cad-review.json` differs
+`2aa1e2ae5785e5f21699506c7768b0e29f60096a5b8c40cdf2aa9f0404619e60`; `cad-review.json` differs
 in exactly one field, `artifacts.step.sha256`, which honestly records those raw STEP bytes.
+
+Sizes and hashes above are from the 2026-08-02 source-unit checkpoint. They changed against the
+first run because the STEP now carries millimetre-converted coordinates and the review declares
+its unit boundaries; the geometry the numbers describe is unchanged.
 
 ## Starting the Viewer
 
@@ -522,3 +526,178 @@ rm -rf tmp/rc-cad-handoff       # includes the Viewer's hidden .step.glb sidecar
 
 Then rerun the generation command above. `tmp/` is disposable and untracked; nothing under it
 is a source of truth.
+
+---
+
+# Unit correction — 2026-08-02
+
+## The defect
+
+Both artifacts were **1,000× too small**. The model rendered with correct relative geometry, so
+nothing looked wrong until it was measured against something external.
+
+The manifest states metres, and `rc_cad_handoff` deliberately does not rescale on the way in —
+a silent unit conversion is indistinguishable from a geometry defect downstream. So the OCCT
+kernel is metre-valued: the 2 m footing is `2.0` units and a Ø16 bar is `0.016`.
+
+cadpy's two writers each assumed millimetres, independently and unconditionally:
+
+| Writer | Assumption | Result |
+|---|---|---|
+| `step_export.create_bin_xcaf_doc` | `SetLengthUnit_s(doc, 1 / UNITS_PER_METER[Unit.MM])` | STEP declared millimetres over metre-valued coordinates → read back as **2 mm** |
+| `glb_mesh_payload.CAD_TO_GLB_SCALE` | hardcoded `0.001` | metre kernel scaled again → **0.002 glTF metres** |
+
+Neither file recorded the assumption, and `cad-review.json` v1 declared the units of its own
+numbers while saying nothing about what the artifacts physically contained. That asymmetry is
+why a thousand-fold error shipped past a review document otherwise built to make its
+assumptions inspectable.
+
+Every engineering value in the review was correct throughout, because the review reads the
+kernel directly and the kernel was always metres. Only the two writers were misinformed.
+
+## Why the kernel stays metre-valued
+
+The obvious alternative — convert the kernel to millimetres so cadpy's assumption becomes true —
+was rejected on evidence.
+
+The argument for it was that OCCT's hard-coded `Precision::Confusion` is `1e-7` in *model units*
+and is tuned for millimetres, so a metre kernel might be numerically cramped. The review records
+four `numericalLimitation` issues, all degenerate booleans, which made the hypothesis worth
+testing rather than assuming.
+
+**The experiment.** The canonical model was built once, then the already-constructed OCCT shapes
+were uniformly scaled by exactly 1000 about the origin — no second geometry implementation, no
+re-authoring, no rounding, so coordinate magnitude was the only variable. Equivalence held to
+machine epsilon (dimensions 2.6e-16, areas 3.2e-16, volumes 2.3e-15 relative; topology counts
+identical on all 16 solids; translation exactly zero and the linear part exactly identity). A
+third arm applied the same transform at scale 1.0 to prove the transform itself was neutral,
+which it was — 0.0000e+00 deviation.
+
+**The result.** Millimetre scale:
+
+- **resolved zero limitations** — all three distinct degenerate computations behaved
+  bit-for-bit identically, and no fuzzy value rescued them at either scale;
+- **preserved all 91 pair classifications** — 48 `CONTACT` and 12 `INTERSECTING` at both
+  scales, worst relative clearance delta 3.1e-05;
+- **destabilised two intersection-volume diagnostics** — the `dowel-0/1` and `dowel-2/3`
+  pairs are symmetric twins returning bit-identical volumes at metre scale; at millimetre scale
+  they diverged by 4.2 % and 36.5 %, a 39 % symmetry break where there was none.
+
+The precision-headroom argument is also simply false here: the tightest ratio at metre scale is
+the smallest nonzero clearance at **615× `Confusion`**, and the classification band sits at
+**5,000×**. The kernel is nowhere near OCCT's floor.
+
+So converting the kernel offered **no robustness gain**, would have perturbed values that are
+stable today, and would have put every OCCT-derived number in the review at risk through three
+expressions that mix kernel-space and manifest-space quantities. It was rejected.
+
+## The correction: one typed source unit
+
+`cadpy.length_unit.metres_per_source_unit` is the single boundary where the scale is decided,
+and it returns **metres per kernel unit** — which is exactly what both writers need:
+
+- STEP passes it to `XCAFDoc_DocumentTool::SetLengthUnit`, which OCCT applies as a coordinate
+  scale when it writes the file;
+- GLB uses it as the vertex scale, because glTF fixes linear distance at metres.
+
+One number, two writers, so the artifacts cannot disagree about physical size.
+
+```python
+from build123d import Unit
+from cadpy.step_export import export_build123d_step_scene
+from cadpy.glb import export_native_glb_from_scene
+
+scene = export_build123d_step_scene(assembly, step_path, source_length_unit=Unit.M)
+export_native_glb_from_scene(step_path, scene, source_length_unit=Unit.M, ...)
+```
+
+`source_length_unit` is typed with build123d's `Unit`, keyword-only, additive, and defaults to
+millimetres — every existing caller is unchanged, verified by comparing an omitted argument
+against an explicit `Unit.MM` (STEP geometry identical, GLB byte-identical).
+
+**Why `Unit | None = None` rather than `Unit = Unit.MM`.** Importing any part of build123d runs
+`build123d/__init__.py`, costing ~1.5 s and pulling OCP. `cadpy.glb` and `cadpy.step_export`
+deliberately import build123d only inside functions, and `import cadpy.glb` measurably does not
+load it. A `Unit.MM` default is evaluated at module import and would destroy that. `None`
+therefore *means* `Unit.MM`, the millimetre path never imports build123d at all, and two tests
+pin the equivalence and the import cost so neither can regress.
+
+**The coupling is structural, not conventional.** `LoadedStepScene` carries the unit its STEP
+was written with, so a GLB written from that scene inherits it. Passing a *different* unit to
+the GLB export raises rather than silently writing an artifact that contradicts its own STEP.
+
+## The physical contract
+
+| Boundary | Unit |
+|---|---|
+| `RcCadHandoffV1` lengths / bar diameters | m / mm |
+| OCCT kernel | **m** (unchanged) |
+| Source unit declared to cadpy | `Unit.M` |
+| Derived STEP length-unit scale | 1.0 |
+| Derived GLB scale | 1.0 |
+| STEP declared unit | mm (OCCT always writes AP214 in mm; coordinates carry the conversion) |
+| STEP physical | **m** — the 2 m footing is written as 2000 mm |
+| GLB physical | **m** — 2.0 glTF metres |
+| `cad-review.json` | m / m³ |
+
+Verified by independent read-back, not by reading the header: `STEPControl_Reader` returns a
+2.000000 m footing, the GLB node hierarchy walks to 2.000000 glTF metres, and the two agree to
+**0.0000 mm**.
+
+## Review format version 2
+
+`reviewFormatVersion` moves `1 → 2`. `RcCadHandoffV1` is untouched and remains schema version 1.
+
+Version 2 adds `units.boundaries`, which states the unit of every boundary above — including the
+physical unit of the STEP and the GLB — so a reader can establish artifact size without opening
+source code. It also adds `issues[].causeId`; see below.
+
+## Reporting accuracy
+
+Two corrections, neither of which changes an engineering verdict.
+
+**The degenerate pairs are not "coincident centrelines".** `F1-C1-dowel-4/6` and
+`F1-C1-dowel-5/7` are coplanar arcs that leave the same elevation tangent to horizontal, curve
+in *opposite* directions, and cross at a shallow angle — a near-tangential surface meeting. The
+pairs that genuinely are collinear and exactly coincident over ~158 mm (`dowel-0/1`,
+`dowel-2/3`) boolean cleanly. The old wording named the wrong cause and sent a reader to the
+wrong geometry. The note now reads: *near-tangential coplanar arc crossing, so exact centreline
+classification is available while the OCCT common-volume boolean is numerically degenerate.*
+
+**Four records, three causes.** The interface tie `F1-C1:starter:stirrup:0.0000` is clipped
+against the footing once, and that one boolean is reported under both the cover check and the
+containment check. Both records remain, both checks keep their authority and status, and they
+now share a deterministic `causeId` derived from stable ids only. `summary` reports
+`numericalLimitationRecordCount` (4) beside `numericalLimitationDistinctCauseCount` (3), so a
+reader cannot count one boolean as two independent geometry failures.
+
+## Engineering results, unchanged
+
+Every value below is byte-identical to the pre-correction review:
+
+12 prohibited overlaps · 12 `AGREEMENT`, 0 `DISAGREEMENT` · worst delta 0.0016 mm · 48
+intentional contacts · 36 mm observed footing cover against 50 mm placement intent,
+`NOT_COMPARABLE` · containment `NOT_EVALUATED` · column cover `OUT_OF_SCOPE` · interface tie
+unmeasurable · footing mat not modelled · footing 2.0 m³ and column 0.183562067 m³ reconciling
+to `-0.0` · 14 bars · 38 exact arcs · 0 approximated arcs.
+
+## Viewer verification
+
+The corrected STEP was rendered through the CAD skill's mandatory snapshot validation in
+isometric and front-elevation views. The cage reads correctly: eight hooked dowels with their
+feet just above the footing soffit — the 36 mm cover — rising into the column, with starter ties
+at the detailed levels. Measured off the front elevation the scale is consistent across
+independent features (670 px/m across the footing, 676 px/m through its thickness, 675 px/m
+across the column). The model is no longer undersized.
+
+## Remaining structural findings
+
+**`ARC_PLANE_DEGENERACY_TOL` is dimensionally overloaded.** The single constant `1e-12` in
+`geometry.py` is compared against quantities of three different dimensions: a cross-product
+magnitude (L²) at the arc-plane check, and a magnitude that is L for a straight segment but L³
+for an arc at the start-tangent check. It is harmless today only because a metre kernel keeps
+all three within a few orders of 1e-12 for this model.
+
+It is **not** responsible for the unit defect, is **not** required by this correction, and is
+deliberately left untouched here. It deserves a focused change of its own, with its own
+reasoning about what each use site should actually be comparing.

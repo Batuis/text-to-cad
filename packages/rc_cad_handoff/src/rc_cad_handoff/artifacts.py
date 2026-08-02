@@ -20,19 +20,34 @@ import re
 from dataclasses import dataclass
 from pathlib import Path
 
-from build123d import Compound, Solid
+from build123d import Compound, Solid, Unit
 
 from cadpy.file_metadata import text_to_cad_identity_metadata
 from cadpy.glb import export_native_glb_from_scene
+from cadpy.length_unit import metres_per_source_unit, source_length_unit_name
 from cadpy.step_export import export_build123d_step_scene
 from cadpy.step_scene import mesh_step_scene, scene_export_shape
 
 from .geometry import RealisedModel, as_solid
 from .manifest import Handoff
 
+#: The unit this consumer authors OCCT coordinates in.
+#:
+#: ``RcCadHandoffV1`` states lengths in metres and this package deliberately
+#: does not rescale them (see ``manifest`` module docstring), so the kernel is
+#: metre-valued: the 2 m footing is 2.0 units and a Ø16 bar is 0.016. cadpy's
+#: writers assumed millimetres unconditionally until this declaration existed,
+#: which is why both artifacts used to come out a thousand times small.
+#:
+#: One value, passed to both writers. It is deliberately not two settings: the
+#: STEP and the GLB must never be able to disagree about physical size.
+SOURCE_LENGTH_UNIT = Unit.M
+
 #: Mesh tolerances for the GLB. The linear value matches the producer's own
 #: collision chord tolerance so the visualisation is no coarser than the
-#: geometry the review reasons about.
+#: geometry the review reasons about. Both are kernel-space, hence metres here,
+#: and neither changes with the source-unit declaration — the kernel did not
+#: move.
 GLB_LINEAR_DEFLECTION = 0.0005
 GLB_ANGULAR_DEFLECTION = 0.2
 
@@ -78,6 +93,45 @@ class ArtifactRecord:
         if self.nondeterministic_layer is not None:
             out["nondeterministicLayer"] = self.nondeterministic_layer
         return out
+
+
+def unit_contract() -> dict[str, object]:
+    """What each boundary of the pipeline measures in, derived not restated.
+
+    Every value here is computed from ``SOURCE_LENGTH_UNIT`` or read from the
+    contract, so the review cannot claim a unit the exporter did not use. A
+    reader should be able to establish the physical size of the STEP and the
+    GLB from this block alone, without opening any source file — the absence
+    of exactly that is what let a thousand-fold scale error ship unnoticed.
+    """
+    metres_per_unit = metres_per_source_unit(SOURCE_LENGTH_UNIT)
+    return {
+        # What the producer's document states.
+        "manifestLength": "m",
+        "manifestBarDiameter": "mm",
+        # What this consumer hands to OCCT/build123d. Unchanged by the unit
+        # correction: the kernel was always metre-valued, only the writers
+        # were misinformed.
+        "kernelLength": source_length_unit_name(SOURCE_LENGTH_UNIT),
+        # What the exporter declared to cadpy, and the two factors derived
+        # from that one declaration.
+        "sourceLengthUnitDeclaredToCadpy": source_length_unit_name(SOURCE_LENGTH_UNIT),
+        "metresPerKernelUnit": metres_per_unit,
+        "stepLengthUnitScale": metres_per_unit,
+        "glbScale": metres_per_unit,
+        # What the files physically contain. The STEP header names millimetres
+        # because OCCT always writes AP214 in millimetres; it converts the
+        # coordinates by stepLengthUnitScale on the way out, so the geometry is
+        # metric-correct and a 2 m footing reads back as 2 m.
+        "stepDeclaredLength": "mm",
+        "stepPhysicalLength": "m",
+        "glbPhysicalLength": "m",
+        # What the numbers in this review mean.
+        "reviewLength": "m",
+        "reviewVolume": "m3",
+        "angle": "deg",
+        "orientationConversion": "Z-up kernel to Y-up glTF, applied to the GLB only",
+    }
 
 
 @dataclass
@@ -136,12 +190,16 @@ def write_artifacts(
         source_hash=handoff.manifest_sha256,
     )
 
+    # The unit is declared once, here. It reaches the STEP through the XCAF
+    # document and travels on the returned scene into the GLB writer, so the
+    # two artifacts are structurally incapable of disagreeing about scale.
     scene = export_build123d_step_scene(
         assembly,
         step_path,
         text_to_cad_entry_kind="assembly",
         source_path=identity["sourcePath"],
         source_hash=identity["sourceHash"],
+        source_length_unit=SOURCE_LENGTH_UNIT,
     )
 
     mesh_step_scene(
@@ -151,6 +209,10 @@ def write_artifacts(
         relative=False,
     )
     scene_export_shape(scene)
+    # Passing the unit again is deliberate rather than redundant: the writer
+    # cross-checks it against the scene's own declaration and raises if they
+    # differ, so changing one of the two in future fails loudly instead of
+    # shipping a STEP and a GLB that are a thousand times apart.
     written_glb = Path(
         export_native_glb_from_scene(
             step_path,
@@ -158,6 +220,7 @@ def write_artifacts(
             target_path=glb_path,
             linear_deflection=GLB_LINEAR_DEFLECTION,
             angular_deflection=GLB_ANGULAR_DEFLECTION,
+            source_length_unit=SOURCE_LENGTH_UNIT,
         )
     )
 
