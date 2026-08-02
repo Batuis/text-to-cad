@@ -298,3 +298,227 @@ its provenance and licensing recorded in
   injecting a skewed producer measurement instead.
 - A generic, rebar-agnostic solid-clearance utility remains the only plausible upstream
   contribution, and is not proposed here.
+
+---
+
+# Reviewing the model locally — 2026-08-01
+
+How to regenerate the artifacts and inspect them in the existing CAD Viewer, with the review
+read **beside** the Viewer rather than inside it. Nothing in this section adds a Viewer panel,
+a findings overlay, or a second web application.
+
+> **This model contains unresolved detailing findings and is not construction-ready.**
+
+## Prerequisites
+
+Python, per `CONTRIBUTING.md`:
+
+```bash
+python3.12 -m venv .venv
+./.venv/bin/python -m pip install --upgrade pip
+./.venv/bin/python -m pip install -r requirements-dev.txt
+```
+
+Viewer, per `CONTRIBUTING.md` and `AGENTS.md`:
+
+```bash
+npm --prefix viewer install
+npm --prefix packages/cadjs install        # required: see note below
+npm --prefix packages/implicitjs install   # only for the implicitjs suite
+npm --prefix viewer run build              # serve mode needs viewer/dist
+```
+
+`npm --prefix packages/cadjs install` is not optional for tests. Three viewer suites
+(`renderState`, `fileSessionState`, `sidebar`) import through the `viewer/packages/cadjs`
+symlink; Node resolves their `three` import from the **real** `packages/cadjs/` path, which
+does not see `viewer/node_modules`. Without it those three files fail with
+`ERR_MODULE_NOT_FOUND: three` — a missing install, not a code defect. With it the viewer suite
+is 400/400.
+
+Netgen and NGSolve are **not** installed and are not required.
+
+## Canonical input
+
+The manifest is the Stabileo-side fixture, read directly from the PR19 worktree and pinned by
+hash — the CLI refuses to run if it does not match:
+
+```
+web/src/lib/export/__fixtures__/rc-footing-cad-poc.handoff.json
+88,101 bytes
+sha256 795e9de26f2eb8ce8d51f2ac7130336702fc534588f390071e3bd40bc03aa0e7
+```
+
+## Generating the artifacts
+
+```bash
+.venv/bin/rc-cad-handoff \
+  <stabileo-pr19>/web/src/lib/export/__fixtures__/rc-footing-cad-poc.handoff.json \
+  -o tmp/rc-cad-handoff \
+  --expect-sha256 795e9de26f2eb8ce8d51f2ac7130336702fc534588f390071e3bd40bc03aa0e7
+```
+
+Output — `tmp/` is disposable, untracked (`.gitignore`), and safe to delete at any time:
+
+| File | Bytes |
+|---|---|
+| `tmp/rc-cad-handoff/rc-cad-Z1-det3-dem2.step` | 347,551 |
+| `tmp/rc-cad-handoff/rc-cad-Z1-det3-dem2.glb` | 1,964,408 |
+| `tmp/rc-cad-handoff/cad-review.json` | 107,024 |
+
+**None of these are committed.** `AGENTS.md` requires permanent CAD artifacts to live under
+`models/`; these are a throwaway review run, not durable fixtures, so they go to `tmp/` and are
+regenerated on demand instead of being tracked.
+
+Determinism, reconfirmed on two runs: the GLB is byte-identical; the STEP differs only in its
+ISO-10303-21 `FILE_NAME` timestamp, with `contentSha256` stable at
+`db6ac10558b0eaea4f5ca466b7f32149af07350945cda411606bd1450d510187`; `cad-review.json` differs
+in exactly one field, `artifacts.step.sha256`, which honestly records those raw STEP bytes.
+
+## Starting the Viewer
+
+Documented `serve` entrypoint only, run from `skills/cad-viewer`:
+
+```bash
+npm --prefix scripts/viewer run serve -- \
+  --host 127.0.0.1 \
+  --dir /absolute/path/to/text-to-cad/tmp/rc-cad-handoff \
+  --shutdown-after 12h --json
+```
+
+Read the bound port from the final `{...}` stdout line rather than assuming `4178`. `--dir`
+must be absolute and becomes the `?dir=` root; `file=` is relative to it. The server refuses
+any path outside that root.
+
+```
+http://127.0.0.1:4178/?dir=%2Fabsolute%2Fpath%2Fto%2Ftext-to-cad%2Ftmp%2Frc-cad-handoff&file=rc-cad-Z1-det3-dem2.glb
+```
+
+This does not collide with Stabileo's own server on port 4000.
+
+## Which file to open, and why both
+
+| Open | What the Viewer gives you |
+|---|---|
+| `…​.glb` | mesh view only — orbit/pan/zoom, appearance, metadata (path, size, sha256) |
+| `…​.step` | **assembly tree with the stable body names**, per-body show/hide, inspect/focus |
+
+`references/viewer-features.md` is explicit that assembly trees and part hide/show are STEP
+features; `.glb` is mesh-only. So the GLB confirms the delivered mesh loads and measures
+correctly, and the **STEP** is what you drive for anything that needs a body name. Both come
+from the same run and carry the same `concrete:<bodyId>` / `bar:<barId>` names.
+
+### STEP sidecar note
+
+The catalog scanner lists a standalone `.step` with an empty hash until its hidden render
+sidecar exists, because it expects `.rc-cad-Z1-det3-dem2.step.glb`. Opening the STEP once makes
+the Viewer generate that sidecar itself (`stepArtifactGenerationAvailable: true`), after which
+the catalog entry resolves normally. The sidecar is the Viewer's own derived cache — hidden,
+inside disposable `tmp/`, untracked, and regenerated on demand. Nothing here fabricates a
+sidecar or renames a file to satisfy the scanner.
+
+Splitting the outputs into `artifacts/` and `viewer/` subdirectories was considered and
+rejected: the review records `artifacts.step.path` / `artifacts.glb.path` relative to the
+output directory, so moving either file would leave the review pointing at a path that does not
+exist. Keeping one flat directory preserves that provenance; the transient scanner warning is
+the cheaper cost.
+
+## Reading the review beside the Viewer
+
+There is no CLI that reads an existing `cad-review.json` back — `rc-cad-handoff` recomputes a
+review rather than reporting a stored one. To inspect the artifact you already generated,
+without recomputing anything:
+
+```bash
+python3 - tmp/rc-cad-handoff/cad-review.json <<'PY'
+import json, sys
+r = json.load(open(sys.argv[1]))
+s, src, art = r["summary"], r["source"], r["artifacts"]
+kind = lambda k: [i for i in r["issues"] if i["kind"] == k]
+print("THIS MODEL CONTAINS UNRESOLVED DETAILING FINDINGS AND IS NOT CONSTRUCTION-READY.\n")
+print(f"manifest      {src['manifestSha256']}")
+print(f"subject       {src['subject']['name']} ({src['subject']['kind']}), scope {art['assemblyLabel']}")
+print(f"solids        {s['concreteComponents']} concrete + {s['barSolids']} bars; {s['totalArcs']} arcs, {s['approximatedArcs']} approximated")
+for k in ("step", "glb"):
+    a = art[k]
+    print(f"{k.upper():4s}          {a['sha256']}  ({a['sizeBytes']} B)"
+          + (f"\n              contentSha256 {a['contentSha256']}" if a.get("contentSha256") else ""))
+print(f"overlaps      {s['authoritativeFindingCount']} producer findings; "
+      f"{s['agreementCount']}/{s['crossCheckedPairCount']} agree, {s['disagreementCount']} disagree; "
+      f"worst delta {s['worstDeltaM']*1000:.4f} mm")
+for i in kind("coverObservationBelowRequirement"):
+    print(f"cover         {i['minimumObservedCover']*1000:.0f} mm observed vs {i['requiredDistance']*1000:.0f} mm "
+          f"placement intent — {i['comparison']} ({i['checkId']})")
+for p in r["observationPolicy"]:
+    print(f"check         {p['checkId']:44s} producer={p['producerVerdictStatus']:14s} consumer={p['consumerAction']}")
+for i in kind("numericalLimitation"):
+    who = i.get("barIdA","") + ((" / " + i["barIdB"]) if i.get("barIdB") else "")
+    print(f"unmeasurable  {who}")
+print(f"intentional   {s['unreportedClosePairCount']} close pairs declared non-reportable by the producer")
+for i in kind("unsupportedCondition"):
+    print(f"unsupported   {i['code']}")
+print(f"\ncleanPass={s['cleanPass']} blocked={s['blockedByUnsupportedConditions']}\n{s['cleanPassRationale']}")
+PY
+```
+
+That surfaces, from the stored file: manifest identity and model scope; both artifact hashes;
+12 prohibited overlaps with CAD agreeing on all 12 and a worst delta of 0.0016 mm; 36 mm
+observed cover against 50 mm placement intent marked `NOT_COMPARABLE`; containment
+`NOT_EVALUATED`; column cover `OUT_OF_SCOPE`; the unmeasurable interface tie; 48 intentional
+contacts; the unmodelled footing mat; and the not-construction-ready verdict.
+
+## Stable-ID reconciliation
+
+The link between the review and the Viewer is the body name — `bar:<barId>` in the assembly
+tree is the same `barId` the review reports. To check a finding:
+
+1. take the `barId` from `cad-review.json`;
+2. open the **STEP** in the Viewer and expand the tree;
+3. hide everything except that bar (or pair);
+4. confirm the geometry matches what was reported.
+
+Four worked examples, all confirmed this way:
+
+| Finding | Stable IDs | What the Viewer shows |
+|---|---|---|
+| Coincident centrelines, `cadCentrelineDistance` 0.0 m, degenerate boolean | `bar:F1-C1-dowel-4` + `bar:F1-C1-dowel-6` | one apparent shaft, two hook feet diverging at the base — two Ø16 bars in the same space |
+| 1.1716 mm centreline separation, clearance −14.828 mm | `bar:F1-C1-dowel-0` + `bar:F1-C1-dowel-4` | two shafts touching along their length |
+| Governing 36 mm observed cover | `bar:F1-C1-dowel-0` (all eight dowels tie at 0.036 m) | hook foot sitting near the pad's bottom face |
+| Unmeasurable interface tie | `bar:F1-C1:starter:stirrup:0.0000` | tie lying flush in the footing's top face — the coplanar case where the clip boolean returns empty |
+
+Independent corroboration: rebuilding the centrelines from the manifest and measuring minimum
+distance reproduces 1.1752 mm against the review's 1.1716 mm, and ~0.1 mm against 0.0 mm for
+the coincident pairs, both within polyline sampling error of the review's exact OCCT values.
+
+## Limitations found while doing this
+
+- **The GLB is 1000× smaller than life.** `cadpy`'s `glb_mesh_payload.CAD_TO_GLB_SCALE = 0.001`
+  is a millimetre→metre conversion, correct for `cadpy`'s usual mm-authored STEP models but
+  wrong for this manifest, which is authored and built in metres. The 2.000 m footing exports
+  as 0.002 glTF units. The factor is **uniform** — every body shares it to float precision, so
+  proportions, relative positions and the Z-up→Y-up conversion (right-handed, verified against
+  the manifest; nothing mirrored) are all intact, and the Viewer frames the model normally.
+  But against the glTF convention of 1 unit = 1 metre the assembly is not to scale, and the GLB
+  declares no unit or up-axis metadata to say so. Not corrected here.
+- No interactive findings overlay. Issues are not highlighted in the Viewer; the review is read
+  separately, as above. That is the deliberate scope of this checkpoint.
+- The GLB path has no assembly tree, so body-name work has to go through the STEP.
+- Model scope remains a footing column-transfer cage: 2 concrete bodies, 8 dowels, 6 starter
+  ties. The footing mat is declared unmodelled, so this document carries only part of the
+  reinforcement.
+
+## Upstream conflict
+
+Upstream PR #92 (`feat/viewer-feedback`, open, last updated 2026-06-25) touches
+`CadWorkspace.js`, `CadViewer.js`, `cadManifestStore.js`, `httpHandlers.mjs`,
+`localAssetBackend.mjs` and `cadDirectoryScanner.mjs`, plus `skills/cad-viewer/SKILL.md` and
+`.gitignore`. This workflow uses the Viewer entirely as shipped and modifies none of them; an
+overlay would have had to.
+
+## Cleanup and regeneration
+
+```bash
+rm -rf tmp/rc-cad-handoff       # includes the Viewer's hidden .step.glb sidecar
+```
+
+Then rerun the generation command above. `tmp/` is disposable and untracked; nothing under it
+is a source of truth.
