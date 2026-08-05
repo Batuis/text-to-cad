@@ -24,7 +24,39 @@ from .errors import ContractError, StructureError
 from .status import KNOWN_POLICIES
 
 CONTRACT = "RcCadHandoffV1"
-SUPPORTED_SCHEMA_VERSIONS = frozenset({1})
+
+#: Every version this consumer reads, and the contract name each one must declare.
+#:
+#: Two entries rather than one because the producer's subject changed: V1 carries the
+#: column-transfer cage and says, in its own conditions, that the footing mats are NOT bar
+#: geometry. Once the mats became physical steel that stopped being true, and a V1 document
+#: carrying them would have to describe twenty mat bars as column dowels — so the producer
+#: declared V2 instead of widening V1. Reading both is what lets an old file on disk keep working.
+CONTRACTS: dict[int, str] = {1: "RcCadHandoffV1", 2: "RcCadHandoffV2"}
+SUPPORTED_SCHEMA_VERSIONS = frozenset(CONTRACTS)
+
+#: Reinforcement families each version may declare.
+#:
+#: V1's two are frozen. V2 adds the crossties the certified column layout earns and the two mat
+#: directions. A family kind outside its version's set is refused rather than guessed at: the whole
+#: point of naming families is that a consumer can act on the name, and a mat bar silently read as
+#: a column dowel is the exact defect that made V2 necessary.
+FAMILY_KINDS: dict[int, frozenset[str]] = {
+    1: frozenset({"columnDowel", "starterTie"}),
+    2: frozenset(
+        {
+            "columnDowel",
+            "starterTie",
+            "starterCrosstie",
+            "footingBottomMatX",
+            "footingBottomMatY",
+        }
+    ),
+}
+
+#: The two V2 families that describe bottom-mat steel. Never a column dowel.
+MAT_FAMILY_KINDS = frozenset({"footingBottomMatX", "footingBottomMatY"})
+TIE_FAMILY_KINDS = frozenset({"starterTie", "starterCrosstie"})
 
 #: Bar-pair classification the producer treats as never acceptable.
 PAIR_CLASS_PROHIBITED_OVERLAP = "prohibitedOverlap"
@@ -143,11 +175,50 @@ class Mark:
 
 
 @dataclass(frozen=True)
+class MatRegion:
+    """One distribution region of one bottom-mat direction."""
+
+    kind: str
+    bar_ids: tuple[str, ...]
+    spacing_centre: float
+    spacing_clear: float
+    width: float
+    centre_offset: float
+
+
+@dataclass(frozen=True)
+class MatFamilyDetail:
+    """Which mat this family is, and where it physically sits.
+
+    Read rather than derived. A consumer that clustered bar elevations to recover the layer order
+    would be inferring something the producer already resolved and stated.
+    """
+
+    direction: str
+    layer: str
+    axis_elevation: float
+    clear_cover_to_soffit: float
+    regions: tuple[MatRegion, ...]
+
+
+@dataclass(frozen=True)
+class TieFamilyDetail:
+    """Legs across the width and the stations along the lap."""
+
+    legs_contributed: int
+    stations: tuple[float, ...]
+
+
+@dataclass(frozen=True)
 class ReinforcementFamily:
     family_id: str
     kind: str
     purpose_key: str
     bar_ids: tuple[str, ...]
+    #: V2 only, and present exactly on the two mat families.
+    mat: MatFamilyDetail | None = None
+    #: V2 only, and present exactly on the tie and crosstie families.
+    tie: TieFamilyDetail | None = None
 
 
 @dataclass(frozen=True)
@@ -234,6 +305,33 @@ class Check:
 
 
 @dataclass(frozen=True)
+class Statuses:
+    """The producer's own statuses, VERBATIM.
+
+    Not re-encoded. The producer distinguishes an anchorage that was VERIFIED from one evaluated
+    and FAILED, and any local three-value re-encoding loses that — so these carry the strings the
+    document carries and a consumer switches on them. ``bottom_anchorage == "FAILED"`` is a real
+    state and is never softened here to NOT_EVALUATED, OK or a warning.
+    """
+
+    constructible: bool
+    constructibility_blockers: tuple[str, ...]
+    bottom_flexure: str
+    bottom_mat_geometry: str
+    bottom_anchorage: str
+    top_reinforcement: str
+    punching_moment_transfer: str
+
+
+@dataclass(frozen=True)
+class BottomMatLayerOrder:
+    """Which mat direction sits in the LOWER physical layer, stated once."""
+
+    lower_direction: str
+    resolution: str
+
+
+@dataclass(frozen=True)
 class Handoff:
     """A parsed, structurally validated handoff document."""
 
@@ -262,6 +360,10 @@ class Handoff:
     #: SHA-256 of the exact bytes parsed, so a review names the document it read.
     manifest_sha256: str
     manifest_bytes: int
+    #: V2 only. ``None`` for a V1 document, which states no statuses block at all.
+    statuses: Statuses | None = None
+    #: V2 only, and ``None`` when the producer modelled no mat.
+    bottom_mat_layer_order: BottomMatLayerOrder | None = None
 
     # -- lookups ---------------------------------------------------------
 
@@ -428,13 +530,6 @@ def parse_handoff_object(raw: Any, *, sha256: str, size_bytes: int) -> Handoff:
     # Contract identity first. Everything after this assumes the field names
     # mean what this format says they mean, so an unknown contract must not be
     # parsed on the chance that it happens to look similar.
-    schema = root.get("schema")
-    if schema != CONTRACT:
-        raise ContractError(
-            "UNKNOWN_CONTRACT",
-            f"expected contract {CONTRACT!r}, got {schema!r}",
-            "schema",
-        )
     version = root.get("schemaVersion")
     if version not in SUPPORTED_SCHEMA_VERSIONS:
         raise ContractError(
@@ -442,6 +537,19 @@ def parse_handoff_object(raw: Any, *, sha256: str, size_bytes: int) -> Handoff:
             f"schema version {version!r} is not supported "
             f"(supported: {sorted(SUPPORTED_SCHEMA_VERSIONS)})",
             "schemaVersion",
+        )
+    # The name must AGREE with the version, in both directions. A document claiming
+    # ``RcCadHandoffV1`` at version 2 is refused rather than resolved by trusting whichever field
+    # the reader happened to look at first — the two self-descriptions disagreeing is itself the
+    # defect, and picking one would be wrong half the time.
+    schema = root.get("schema")
+    expected_contract = CONTRACTS[int(version)]
+    if schema != expected_contract:
+        raise ContractError(
+            "UNKNOWN_CONTRACT",
+            f"schema version {version!r} must declare contract {expected_contract!r}, "
+            f"got {schema!r}",
+            "schema",
         )
 
     generator = _obj(_req(root, "generator", "$"), "generator")
@@ -476,7 +584,7 @@ def parse_handoff_object(raw: Any, *, sha256: str, size_bytes: int) -> Handoff:
         for i, node in enumerate(_seq(reinforcement, "marks", "reinforcement"))
     )
     families = tuple(
-        _parse_family(node, f"assembly.families[{i}]")
+        _parse_family(node, f"assembly.families[{i}]", int(version))
         for i, node in enumerate(_seq(assembly, "families", "assembly"))
     )
     cover = tuple(
@@ -538,6 +646,18 @@ def parse_handoff_object(raw: Any, *, sha256: str, size_bytes: int) -> Handoff:
         source_git_revision=_str_or_none((source or {}).get("gitRevision")),
         manifest_sha256=sha256,
         manifest_bytes=size_bytes,
+        # V2 only. A V1 document states no statuses block, and inventing one would be this
+        # consumer asserting verdicts the producer never made.
+        statuses=(
+            _parse_statuses(_req(root, "statuses", "$"), "statuses")
+            if int(version) >= 2
+            else None
+        ),
+        bottom_mat_layer_order=_parse_layer_order(
+            assembly.get("bottomMatLayerOrder"), "assembly.bottomMatLayerOrder"
+        )
+        if int(version) >= 2
+        else None,
     )
 
     validate_semantics(handoff)
@@ -713,13 +833,134 @@ def _parse_mark(node: Any, path: str) -> Mark:
     )
 
 
-def _parse_family(node: Any, path: str) -> ReinforcementFamily:
+def _parse_mat_region(node: Any, path: str) -> MatRegion:
     obj = _obj(node, path)
+    return MatRegion(
+        kind=_text(_req(obj, "kind", path), f"{path}.kind"),
+        bar_ids=tuple(str(v) for v in _seq(obj, "barIds", path)),
+        spacing_centre=_finite(_req(obj, "spacingCentre", path), f"{path}.spacingCentre"),
+        spacing_clear=_finite(_req(obj, "spacingClear", path), f"{path}.spacingClear"),
+        width=_finite(_req(obj, "width", path), f"{path}.width"),
+        centre_offset=_finite(_req(obj, "centreOffset", path), f"{path}.centreOffset"),
+    )
+
+
+def _parse_mat_detail(node: Any, path: str) -> MatFamilyDetail:
+    obj = _obj(node, path)
+    return MatFamilyDetail(
+        direction=_text(_req(obj, "direction", path), f"{path}.direction"),
+        layer=_text(_req(obj, "layer", path), f"{path}.layer"),
+        axis_elevation=_finite(_req(obj, "axisElevation", path), f"{path}.axisElevation"),
+        clear_cover_to_soffit=_finite(
+            _req(obj, "clearCoverToSoffit", path), f"{path}.clearCoverToSoffit"
+        ),
+        regions=tuple(
+            _parse_mat_region(r, f"{path}.regions[{i}]")
+            for i, r in enumerate(_seq(obj, "regions", path))
+        ),
+    )
+
+
+def _parse_tie_detail(node: Any, path: str) -> TieFamilyDetail:
+    obj = _obj(node, path)
+    return TieFamilyDetail(
+        legs_contributed=_int(_req(obj, "legsContributed", path), f"{path}.legsContributed"),
+        stations=tuple(_finite(v, f"{path}.stations[]") for v in _seq(obj, "stations", path)),
+    )
+
+
+def _parse_family(node: Any, path: str, version: int) -> ReinforcementFamily:
+    obj = _obj(node, path)
+    kind = _text(_req(obj, "kind", path), f"{path}.kind")
+    allowed = FAMILY_KINDS[version]
+    if kind not in allowed:
+        raise ContractError(
+            "UNKNOWN_FAMILY_KIND",
+            f"family kind {kind!r} is not declared by schema version {version} "
+            f"(declared: {sorted(allowed)})",
+            f"{path}.kind",
+        )
+    mat_node = obj.get("mat")
+    tie_node = obj.get("tie")
+    # The detail must MATCH the kind, both ways. A mat family with no mat detail cannot state its
+    # layer, and a dowel family carrying mat detail is describing itself as two things.
+    if kind in MAT_FAMILY_KINDS and mat_node is None:
+        raise StructureError(
+            "MAT_FAMILY_WITHOUT_DETAIL",
+            f"family {kind!r} must carry its mat detail: direction, layer, elevation and regions",
+            f"{path}.mat",
+        )
+    if kind not in MAT_FAMILY_KINDS and mat_node is not None:
+        raise StructureError(
+            "MAT_DETAIL_ON_NON_MAT_FAMILY",
+            f"family {kind!r} carries mat detail but is not a bottom-mat family",
+            f"{path}.mat",
+        )
+    if kind in TIE_FAMILY_KINDS and version >= 2 and tie_node is None:
+        raise StructureError(
+            "TIE_FAMILY_WITHOUT_DETAIL",
+            f"family {kind!r} must carry its tie detail",
+            f"{path}.tie",
+        )
+    mat = _parse_mat_detail(mat_node, f"{path}.mat") if mat_node is not None else None
+    if mat is not None:
+        expected_direction = "X" if kind == "footingBottomMatX" else "Y"
+        if mat.direction != expected_direction:
+            raise StructureError(
+                "MAT_DIRECTION_MISMATCH",
+                f"family {kind!r} states direction {mat.direction!r}; the two cannot disagree",
+                f"{path}.mat.direction",
+            )
     return ReinforcementFamily(
         family_id=_text(_req(obj, "familyId", path), f"{path}.familyId"),
-        kind=_text(_req(obj, "kind", path), f"{path}.kind"),
+        kind=kind,
         purpose_key=_text(_req(obj, "purposeKey", path), f"{path}.purposeKey"),
         bar_ids=tuple(str(v) for v in _seq(obj, "barIds", path)),
+        mat=mat,
+        tie=_parse_tie_detail(tie_node, f"{path}.tie") if tie_node is not None else None,
+    )
+
+
+def _parse_layer_order(node: Any, path: str) -> BottomMatLayerOrder | None:
+    """``None`` is a real answer: the producer modelled no mat.
+
+    Distinguished from a MISSING field, which is a malformed V2 document — V2 requires the key and
+    permits ``null`` as its value, so absence and "no mat" are not the same statement.
+    """
+    if node is None:
+        return None
+    obj = _obj(node, path)
+    return BottomMatLayerOrder(
+        lower_direction=_text(_req(obj, "lowerDirection", path), f"{path}.lowerDirection"),
+        resolution=_text(_req(obj, "resolution", path), f"{path}.resolution"),
+    )
+
+
+def _parse_statuses(node: Any, path: str) -> Statuses:
+    obj = _obj(node, path)
+    constructible = _req(obj, "constructible", path)
+    if not isinstance(constructible, bool):
+        raise StructureError(
+            "NON_BOOLEAN_CONSTRUCTIBLE",
+            f"expected a boolean, got {type(constructible).__name__}",
+            f"{path}.constructible",
+        )
+    return Statuses(
+        constructible=constructible,
+        constructibility_blockers=tuple(
+            str(v) for v in _seq(obj, "constructibilityBlockers", path)
+        ),
+        bottom_flexure=_text(_req(obj, "bottomFlexure", path), f"{path}.bottomFlexure"),
+        bottom_mat_geometry=_text(
+            _req(obj, "bottomMatGeometry", path), f"{path}.bottomMatGeometry"
+        ),
+        bottom_anchorage=_text(_req(obj, "bottomAnchorage", path), f"{path}.bottomAnchorage"),
+        top_reinforcement=_text(
+            _req(obj, "topReinforcement", path), f"{path}.topReinforcement"
+        ),
+        punching_moment_transfer=_text(
+            _req(obj, "punchingMomentTransfer", path), f"{path}.punchingMomentTransfer"
+        ),
     )
 
 

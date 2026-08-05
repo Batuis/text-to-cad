@@ -26,7 +26,7 @@ from typing import Any
 from .artifacts import ArtifactSet, unit_contract
 from .crosscheck import AGREEMENT_BAND_M, CONTACT_TOL_M, CrossCheckResult
 from .geometry import RealisedModel
-from .manifest import CONTRACT, Handoff
+from .manifest import CONTRACTS, Handoff
 from .status import Comparison, IssueKind, Provenance, Realisation
 
 REVIEW_FORMAT = "RcCadReviewV1"
@@ -86,7 +86,10 @@ def build_review(
         "reviewFormat": REVIEW_FORMAT,
         "reviewFormatVersion": REVIEW_FORMAT_VERSION,
         "source": {
-            "contract": CONTRACT,
+            # The contract the DOCUMENT declares, keyed off its own version. Emitting the V1
+            # constant beside `schemaVersion: 2` labelled V2 content as V1 — a consumer keying on
+            # this field would dispatch to the wrong reader.
+            "contract": CONTRACTS[handoff.schema_version],
             "schemaVersion": handoff.schema_version,
             "manifestSha256": handoff.manifest_sha256,
             "manifestSizeBytes": handoff.manifest_bytes,

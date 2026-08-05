@@ -60,10 +60,28 @@ class ContractRefusalTest(unittest.TestCase):
         self.assertEqual(ctx.exception.code, "UNKNOWN_CONTRACT")
 
     def test_refuses_an_unsupported_schema_version(self) -> None:
-        document = fx.mutated(lambda d: d.__setitem__("schemaVersion", 2))
+        # Version 3, not 2: version 2 is now READ, so it is no longer an example of an
+        # unsupported version. A future version is the dangerous case — it has V2's fields plus
+        # more, so a lenient reader would parse it and be silently wrong about the rest.
+        document = fx.mutated(lambda d: d.__setitem__("schemaVersion", 3))
         with self.assertRaises(ContractError) as ctx:
             fx.parse_object(document)
         self.assertEqual(ctx.exception.code, "UNSUPPORTED_SCHEMA_VERSION")
+
+    def test_refuses_a_version_the_contract_name_disagrees_with(self) -> None:
+        # A V1 document claiming version 2. The two self-descriptions conflict, and resolving it
+        # by trusting either field would be wrong half the time.
+        document = fx.mutated(lambda d: d.__setitem__("schemaVersion", 2))
+        with self.assertRaises(ContractError) as ctx:
+            fx.parse_object(document)
+        self.assertEqual(ctx.exception.code, "UNKNOWN_CONTRACT")
+
+    def test_refuses_a_v2_name_at_version_one(self) -> None:
+        # And the mirror: the check is symmetric, so neither field is privileged.
+        document = fx.mutated(lambda d: d.__setitem__("schema", "RcCadHandoffV2"))
+        with self.assertRaises(ContractError) as ctx:
+            fx.parse_object(document)
+        self.assertEqual(ctx.exception.code, "UNKNOWN_CONTRACT")
 
     def test_refuses_rescaled_units(self) -> None:
         document = fx.mutated(lambda d: d["units"].__setitem__("length", "mm"))

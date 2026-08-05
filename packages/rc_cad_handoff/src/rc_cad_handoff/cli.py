@@ -5,7 +5,7 @@ from collections.abc import Sequence
 from pathlib import Path
 
 from .errors import HandoffError
-from .manifest import CONTRACT
+from .manifest import CONTRACT, CONTRACTS
 from .status import Comparison
 
 
@@ -13,11 +13,15 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="rc-cad-handoff",
         description=(
-            f"Realise a {CONTRACT} reinforced-concrete detailing handoff as exact CAD solids, "
+            "Realise a reinforced-concrete detailing handoff — "
+            f"{', '.join(sorted(CONTRACTS.values()))} — as exact CAD solids, "
             "export STEP and GLB, and write an independent cad-review.json cross-check."
         ),
     )
-    parser.add_argument("manifest", help=f"Path to a {CONTRACT} JSON document.")
+    parser.add_argument(
+        "manifest",
+        help=f"Path to a handoff JSON document ({', '.join(sorted(CONTRACTS.values()))}).",
+    )
     parser.add_argument(
         "-o",
         "--output-dir",
@@ -79,7 +83,9 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     handoff = result.handoff
     summary = result.review["summary"]
-    print(f"contract           {CONTRACT} v{handoff.schema_version}")
+    # The contract the DOCUMENT declares, not the constant. Printing `RcCadHandoffV1` above a
+    # `v2` document was a banner reporting one version's name against another's payload.
+    print(f"contract           {CONTRACTS[handoff.schema_version]} v{handoff.schema_version}")
     print(f"subject            {handoff.subject_name} (entity {handoff.subject_entity_id})")
     print(f"manifest sha256    {handoff.manifest_sha256}")
     print(
