@@ -24,7 +24,61 @@ Given one `RcCadHandoffV1` JSON document it will:
    producer's verdicts, this consumer's observations, and the relationship
    between them in three separate places.
 
-## Usage
+## Usage — the normal way, in a browser
+
+A Stabileo RC CAD handoff is a **semantic handoff file, not a CAD drawing**. It describes bar
+families, layer order, covers, findings and verdicts, and no CAD program opens it directly. This
+package turns one into artifacts a CAD tool can open.
+
+Start the local surface:
+
+```bash
+./.venv/bin/python -m rc_cad_handoff.web
+```
+
+Then open **http://127.0.0.1:4179/** and:
+
+1. Click **Open RC handoff JSON…**, or drag the downloaded `.json` onto the page.
+2. The page reports the filename, the schema it read and the footing it describes.
+3. It generates every artifact and lists them, saying what each one is for.
+4. Click **Open assembly in CAD viewer** to see the STEP in the generic viewer.
+
+Nothing else is required: no Python command per file, no repository path, no copying files into a
+catalogue directory, and no hand-built viewer URL.
+
+Flags:
+
+| Flag | Effect |
+|---|---|
+| `--port N` | Serve on another port (default `4179`, chosen to sit beside Stabileo on `4003` and the CAD viewer on `4178`). |
+| `--host H` | Bind address (default `127.0.0.1`; this reads and writes local files, so it is not exposed by default). |
+| `--output-root DIR` | Where artifacts go (default `~/.stabileo/rc-cad-handoff`). |
+| `--viewer-origin URL` | Origin of the generic CAD viewer used to build the "open" link (default `http://127.0.0.1:4178`). |
+
+Each import lands in `<output-root>/<footing>-<first 8 of the handoff's SHA-256>/`, so the same
+document always resolves to the same directory and two different documents never collide. Nothing
+from the uploaded filename reaches the filesystem.
+
+### What it generates, and which one the viewer shows
+
+| Artifact | What it is | Shown by the CAD viewer |
+|---|---|---|
+| `<stem>.step` | The assembly. What a CAD tool opens. | **Yes** — this is the one to open |
+| `<stem>.glb` | Lightweight 3-D visualisation of the same assembly. | Yes |
+| `<stem>.ifc` | IFC4 for inspection in an external BIM tool; every bar is an `IfcReinforcingBar` carrying its family and stable id. | **No** |
+| `cad-review.json` | Review metadata: the cross-check, the findings, the constructibility verdict. | No — it is a report, not geometry |
+
+**Why the viewer does not show the IFC.** The companion CAD viewer is a generic CAD file browser.
+Its catalogue scanner recognises `.step`, `.stp`, `.glb`, `.stl`, `.3mf`, `.dxf`, `.gcode` and robot
+descriptions — file formats, not producers — and IFC is not among them. That is a deliberate
+boundary, not an oversight: the viewer knows nothing about this handoff schema, which is why the
+import lives here instead of there. Open the IFC in an IFC tool.
+
+## Usage — CLI, for scripting and CI
+
+The command below is the same pipeline the page calls, exposed for automation. It is the advanced
+path, not the one to hand a reviewer.
+
 
 ```bash
 rc-cad-handoff path/to/handoff.json -o /path/to/output-dir
