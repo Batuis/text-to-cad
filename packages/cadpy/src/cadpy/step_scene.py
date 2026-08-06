@@ -113,6 +113,12 @@ class LoadedStepScene:
     assembly_mates: list[dict[str, Any]] = field(default_factory=list)
     export_shape: Any | None = None
     doc: Any | None = None
+    #: build123d ``Unit`` the prototype coordinates are authored in, or ``None``
+    #: for the historical millimetre assumption. Carried on the scene so the
+    #: STEP writer and the GLB writer read one declaration instead of two
+    #: arguments that could disagree. Typed loosely to keep build123d out of
+    #: this module's import path.
+    source_length_unit: Any | None = None
 
 
 @dataclass(frozen=True)

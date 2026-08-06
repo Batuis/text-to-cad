@@ -7,8 +7,9 @@ import time
 from array import array
 from collections.abc import Mapping
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
+from cadpy.length_unit import metres_per_source_unit
 from cadpy.glb_mesh_payload import (
     CAD_TO_GLB_SCALE,
     DEFAULT_MATERIAL,
@@ -31,6 +32,9 @@ from cadpy.glb_topology import (
 from cadpy.render import REPO_ROOT, part_glb_path, part_native_glb_path
 from cadpy.step_scene import ColorRGBA, LoadedStepScene, OccurrenceNode, SelectorBundle, occurrence_selector_id
 
+if TYPE_CHECKING:  # pragma: no cover - typing only; build123d stays a lazy import
+    from build123d.build_enums import Unit
+
 
 ARRAY_BUFFER = 34962
 ELEMENT_ARRAY_BUFFER = 34963
@@ -47,6 +51,29 @@ IDENTITY_TRANSFORM = (
     0.0, 0.0, 1.0, 0.0,
     0.0, 0.0, 0.0, 1.0,
 )
+
+
+def _resolve_glb_scale(
+    scene: LoadedStepScene, source_length_unit: "Unit | None" = None
+) -> float:
+    """glTF metres per kernel unit, from a single declaration.
+
+    A scene written by ``cadpy.step_export`` already carries the unit its
+    coordinates are authored in, so the GLB uses that by default and cannot
+    drift from the STEP written alongside it. An explicit
+    ``source_length_unit`` is still accepted for scenes loaded from elsewhere,
+    but if the scene disagrees this raises rather than silently picking one:
+    the two artifacts differing by a factor of a thousand is precisely the
+    failure this parameter exists to prevent.
+    """
+    declared = getattr(scene, "source_length_unit", None)
+    if source_length_unit is not None and declared is not None and declared != source_length_unit:
+        raise ValueError(
+            f"scene declares source_length_unit={declared!r} but the GLB export was "
+            f"given {source_length_unit!r}; refusing to write a GLB that disagrees "
+            "with its STEP about physical size"
+        )
+    return metres_per_source_unit(source_length_unit if source_length_unit is not None else declared)
 
 
 def _display_path(path: Path) -> str:
@@ -66,12 +93,15 @@ def export_part_glb_from_scene(
     color: tuple[float, float, float, float] | None = None,
     selector_bundle: SelectorBundle | None = None,
     include_selector_topology: bool = True,
+    source_length_unit: "Unit | None" = None,
 ) -> Path:
     target_path = part_glb_path(step_path)
     # The hierarchical writer handles plain part scenes too, and unlike the
     # build123d GLB exporter it preserves XCAF colors and occurrence ids.
     _ = (linear_deflection, angular_deflection)
-    return _HierarchicalGlbWriter(scene, color=color).write(
+    return _HierarchicalGlbWriter(
+        scene, color=color, glb_scale=_resolve_glb_scale(scene, source_length_unit)
+    ).write(
         target_path,
         selector_bundle=selector_bundle,
         include_selector_topology=include_selector_topology,
@@ -89,12 +119,18 @@ def export_assembly_glb_from_scene(
     occurrence_colors: Mapping[str, ColorRGBA] | None = None,
     selector_bundle: SelectorBundle | None = None,
     include_selector_topology: bool = True,
+    source_length_unit: "Unit | None" = None,
 ) -> Path:
     target_path = part_glb_path(step_path)
     # The caller meshes the scene before scheduling artifact jobs. Keep the
     # deflection args on this API so assembly/part exports share one contract.
     _ = (linear_deflection, angular_deflection)
-    return _HierarchicalGlbWriter(scene, color=color, occurrence_colors=occurrence_colors).write(
+    return _HierarchicalGlbWriter(
+        scene,
+        color=color,
+        occurrence_colors=occurrence_colors,
+        glb_scale=_resolve_glb_scale(scene, source_length_unit),
+    ).write(
         target_path,
         selector_bundle=selector_bundle,
         include_selector_topology=include_selector_topology,
@@ -111,6 +147,7 @@ def export_native_glb_from_scene(
     angular_deflection: float,
     color: tuple[float, float, float, float] | None = None,
     occurrence_colors: Mapping[str, ColorRGBA] | None = None,
+    source_length_unit: "Unit | None" = None,
 ) -> Path:
     target_path = target_path or part_native_glb_path(step_path)
     # The caller meshes the scene before scheduling sidecar jobs. Keep the
@@ -122,6 +159,7 @@ def export_native_glb_from_scene(
         occurrence_colors=occurrence_colors,
         native_y_up=True,
         include_cad_extras=False,
+        glb_scale=_resolve_glb_scale(scene, source_length_unit),
     ).write(target_path)
 
 
@@ -236,16 +274,21 @@ def build_step_surface_edge_manifest(
     }
 
 
-def _gltf_matrix_from_transform(transform: tuple[float, ...]) -> list[float]:
+def _gltf_matrix_from_transform(
+    transform: tuple[float, ...], glb_scale: float = CAD_TO_GLB_SCALE
+) -> list[float]:
+    # Only the translation column carries length. The rotation block is
+    # dimensionless and must never be scaled, or the model would be distorted
+    # rather than resized.
     if len(transform) != 16:
         transform = IDENTITY_TRANSFORM
     return [
         float(transform[0]), float(transform[4]), float(transform[8]), 0.0,
         float(transform[1]), float(transform[5]), float(transform[9]), 0.0,
         float(transform[2]), float(transform[6]), float(transform[10]), 0.0,
-        float(transform[3]) * CAD_TO_GLB_SCALE,
-        float(transform[7]) * CAD_TO_GLB_SCALE,
-        float(transform[11]) * CAD_TO_GLB_SCALE,
+        float(transform[3]) * glb_scale,
+        float(transform[7]) * glb_scale,
+        float(transform[11]) * glb_scale,
         1.0,
     ]
 
@@ -261,7 +304,9 @@ def _native_y_up_vector(x: float, y: float, z: float) -> tuple[float, float, flo
     return (float(x), float(z), -float(y))
 
 
-def _native_y_up_matrix_from_transform(transform: tuple[float, ...]) -> list[float]:
+def _native_y_up_matrix_from_transform(
+    transform: tuple[float, ...], glb_scale: float = CAD_TO_GLB_SCALE
+) -> list[float]:
     if len(transform) != 16:
         transform = IDENTITY_TRANSFORM
     rotation = (
@@ -280,10 +325,12 @@ def _native_y_up_matrix_from_transform(transform: tuple[float, ...]) -> list[flo
         (0.0, 1.0, 0.0),
     )
     converted = _matmul3(_matmul3(cad_to_y_up, rotation), y_up_to_cad)
+    # Scale then permute: the Y-up conversion is an orthonormal axis swap, so
+    # it commutes with a uniform scale and cannot be affected by it.
     tx, ty, tz = _native_y_up_vector(
-        float(transform[3]) * CAD_TO_GLB_SCALE,
-        float(transform[7]) * CAD_TO_GLB_SCALE,
-        float(transform[11]) * CAD_TO_GLB_SCALE,
+        float(transform[3]) * glb_scale,
+        float(transform[7]) * glb_scale,
+        float(transform[11]) * glb_scale,
     )
     return [
         converted[0][0], converted[1][0], converted[2][0], 0.0,
@@ -711,12 +758,17 @@ class _HierarchicalGlbWriter:
         occurrence_colors: Mapping[str, ColorRGBA] | None = None,
         native_y_up: bool = False,
         include_cad_extras: bool = True,
+        glb_scale: float = CAD_TO_GLB_SCALE,
     ) -> None:
         self.scene = scene
         self.color = color
         self.occurrence_colors = dict(occurrence_colors or {})
         self.native_y_up = native_y_up
         self.include_cad_extras = include_cad_extras
+        #: glTF metres per kernel unit. Applied to vertices in the payload
+        #: builder and to node translations here — disjoint data, so a
+        #: coordinate is scaled exactly once on its way into the file.
+        self.glb_scale = glb_scale
         self.builder = _GlbBuilder()
         self.materials_by_color: dict[tuple[tuple[int, int, int, int], bool | None], int] = {}
         self.meshes_by_key: dict[tuple[object, ...], int | None] = {}
@@ -791,6 +843,7 @@ class _HierarchicalGlbWriter:
             suppress_face_colors=suppress_face_colors,
             include_surface_edges=self.include_surface_edges,
             surface_edge_class_signature=self.surface_edge_class_signature,
+            glb_scale=self.glb_scale,
         )
         if key in self.meshes_by_key:
             return self.meshes_by_key[key]
@@ -801,6 +854,7 @@ class _HierarchicalGlbWriter:
             suppress_face_colors=suppress_face_colors,
             include_surface_edges=self.include_surface_edges,
             surface_edge_class_signature=self.surface_edge_class_signature,
+            glb_scale=self.glb_scale,
         )
         if self.include_surface_edges:
             payload = _apply_surface_edge_classes_to_payload(
@@ -854,8 +908,8 @@ class _HierarchicalGlbWriter:
                 "cadName": occurrence.name or occurrence.source_name or "",
             }
         matrix_for_transform = _native_y_up_matrix_from_transform if self.native_y_up else _gltf_matrix_from_transform
-        matrix = matrix_for_transform(occurrence.local_transform)
-        if matrix != matrix_for_transform(IDENTITY_TRANSFORM):
+        matrix = matrix_for_transform(occurrence.local_transform, self.glb_scale)
+        if matrix != matrix_for_transform(IDENTITY_TRANSFORM, self.glb_scale):
             node["matrix"] = matrix
         mesh = self._mesh_index(occurrence)
         if mesh is not None:

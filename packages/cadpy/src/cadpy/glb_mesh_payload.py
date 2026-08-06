@@ -14,7 +14,15 @@ from OCP.TopoDS import TopoDS
 
 
 ColorRGBA = tuple[float, float, float, float]
+
+#: glTF metres per kernel unit for millimetre-authored coordinates, which is
+#: what cadpy assumed unconditionally before the source unit existed. Retained
+#: as the default of every ``glb_scale`` parameter below so existing callers are
+#: unchanged. Do not read this as "the scale" — a caller authoring in another
+#: unit derives its own from ``cadpy.length_unit.metres_per_source_unit``, and
+#: that function is the single boundary where the value is decided.
 CAD_TO_GLB_SCALE = 0.001
+
 DEFAULT_MATERIAL: ColorRGBA = (0.72, 0.72, 0.72, 1.0)
 
 
@@ -142,6 +150,7 @@ def _append_face_payload(
     nodes: Sequence[Sequence[float]],
     node_normals: Sequence[Sequence[float]],
     triangles: Sequence[Sequence[int]],
+    glb_scale: float = CAD_TO_GLB_SCALE,
 ) -> None:
     if not nodes or not triangles:
         return
@@ -162,9 +171,9 @@ def _append_face_payload(
         vertex_offset = len(positions) // 3
         for node_index in range(len(nodes)):
             point = nodes[node_index]
-            x = float(point[0]) * CAD_TO_GLB_SCALE
-            y = float(point[1]) * CAD_TO_GLB_SCALE
-            z = float(point[2]) * CAD_TO_GLB_SCALE
+            x = float(point[0]) * glb_scale
+            y = float(point[1]) * glb_scale
+            z = float(point[2]) * glb_scale
             positions.extend((x, y, z))
             min_values[0] = min(min_values[0], x)
             min_values[1] = min(min_values[1], y)
@@ -208,9 +217,9 @@ def _append_face_payload(
         for local_vertex, node_index in enumerate(triangle):
             source_node_index = int(node_index)
             point = nodes[source_node_index]
-            x = float(point[0]) * CAD_TO_GLB_SCALE
-            y = float(point[1]) * CAD_TO_GLB_SCALE
-            z = float(point[2]) * CAD_TO_GLB_SCALE
+            x = float(point[0]) * glb_scale
+            y = float(point[1]) * glb_scale
+            z = float(point[2]) * glb_scale
             positions.extend((x, y, z))
             min_values[0] = min(min_values[0], x)
             min_values[1] = min(min_values[1], y)
@@ -232,6 +241,7 @@ def prototype_glb_mesh_payload(
     default_color: ColorRGBA,
     face_colors: Mapping[int, ColorRGBA],
     include_surface_edges: bool = False,
+    glb_scale: float = CAD_TO_GLB_SCALE,
 ) -> ShapeGlbMeshPayload:
     positions = array("f")
     normals = array("f")
@@ -276,6 +286,7 @@ def prototype_glb_mesh_payload(
             edge_side_ordinals=face_entry.get("edgeSideOrdinals") or {},
             edge_surface_class_codes=edge_surface_class_codes,
             include_surface_edges=include_surface_edges,
+            glb_scale=glb_scale,
             nodes=nodes,
             node_normals=node_normals,
             triangles=triangles,
@@ -309,6 +320,7 @@ def shape_glb_mesh_payload(
     default_color: ColorRGBA,
     face_colors: Mapping[int, ColorRGBA],
     include_surface_edges: bool = False,
+    glb_scale: float = CAD_TO_GLB_SCALE,
 ) -> ShapeGlbMeshPayload:
     face_entries: list[dict[str, Any]] = []
     explorer = TopExp_Explorer(shape, TopAbs_FACE)
@@ -355,6 +367,7 @@ def shape_glb_mesh_payload(
         default_color=default_color,
         face_colors=face_colors,
         include_surface_edges=include_surface_edges,
+        glb_scale=glb_scale,
     )
 
 
@@ -366,6 +379,7 @@ def scene_glb_mesh_payload_key(
     suppress_face_colors: bool,
     include_surface_edges: bool = False,
     surface_edge_class_signature: Sequence[str] | tuple[str, ...] = (),
+    glb_scale: float = CAD_TO_GLB_SCALE,
 ) -> tuple[object, ...]:
     return (
         int(prototype_key),
@@ -374,6 +388,10 @@ def scene_glb_mesh_payload_key(
         bool(include_surface_edges),
         tuple(str(item) for item in surface_edge_class_signature),
         getattr(scene, "mesh_signature", None),
+        # Payloads are cached per scene with vertices already scaled, so the
+        # scale is part of their identity. Omitting it would serve millimetre
+        # geometry to a metre caller from cache.
+        float(glb_scale),
     )
 
 
@@ -386,6 +404,7 @@ def scene_glb_mesh_payload(
     prototype: Mapping[str, Any] | None = None,
     include_surface_edges: bool = False,
     surface_edge_class_signature: Sequence[str] | tuple[str, ...] = (),
+    glb_scale: float = CAD_TO_GLB_SCALE,
 ) -> ShapeGlbMeshPayload:
     key = scene_glb_mesh_payload_key(
         scene,
@@ -394,6 +413,7 @@ def scene_glb_mesh_payload(
         suppress_face_colors=suppress_face_colors,
         include_surface_edges=include_surface_edges,
         surface_edge_class_signature=surface_edge_class_signature,
+        glb_scale=glb_scale,
     )
     cache = getattr(scene, "glb_mesh_payloads", None)
     if cache is None:
@@ -414,6 +434,7 @@ def scene_glb_mesh_payload(
             default_color=normalize_rgba(default_color),
             face_colors=face_colors,
             include_surface_edges=include_surface_edges,
+            glb_scale=glb_scale,
         )
     else:
         shape = getattr(scene, "prototype_shapes", {}).get(prototype_key)
@@ -425,6 +446,7 @@ def scene_glb_mesh_payload(
                 default_color=normalize_rgba(default_color),
                 face_colors=face_colors,
                 include_surface_edges=include_surface_edges,
+                glb_scale=glb_scale,
             )
         )
     cache[key] = payload

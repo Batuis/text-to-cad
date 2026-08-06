@@ -3,10 +3,14 @@ from __future__ import annotations
 import os
 from contextlib import nullcontext
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
+from cadpy.length_unit import metres_per_source_unit
 from cadpy.step_scene import LoadedStepScene, load_step_scene_from_xcaf_doc, step_file_hash
 from cadpy.step_metadata import TEXT_TO_CAD_GENERATOR, inject_text_to_cad_step_metadata
+
+if TYPE_CHECKING:  # pragma: no cover - typing only; build123d stays a lazy import
+    from build123d.build_enums import Unit
 
 
 def _collect_assembly_mates(shape: Any) -> list[dict[str, Any]]:
@@ -51,13 +55,20 @@ def _attach_assembly_mates(scene: LoadedStepScene, shape: Any) -> LoadedStepScen
     return scene
 
 
-def create_bin_xcaf_doc() -> Any:
+def create_bin_xcaf_doc(*, source_length_unit: Unit | None = None) -> Any:
+    """An XCAF document that records the unit its coordinates are authored in.
+
+    ``source_length_unit`` is the unit of the build123d/OCCT coordinates being
+    exported; ``None`` means ``Unit.MM``, which is what cadpy assumed before
+    this parameter existed. OCCT treats the document length unit as a scale
+    applied when the STEP is written — a metre-authored 2.0 is emitted as
+    2000 mm — so declaring it correctly is what makes the file physically
+    right. Nothing rescales the kernel shapes themselves.
+    """
     from OCP.BinXCAFDrivers import BinXCAFDrivers
     from build123d.exporters3d import (
         TCollection_ExtendedString,
         TDocStd_Document,
-        UNITS_PER_METER,
-        Unit,
         XCAFApp_Application,
         XCAFDoc_DocumentTool,
     )
@@ -67,7 +78,7 @@ def create_bin_xcaf_doc() -> Any:
     BinXCAFDrivers.DefineFormat_s(application)
     application.NewDocument(TCollection_ExtendedString("BinXCAF"), doc)
     application.InitDocument(doc)
-    XCAFDoc_DocumentTool.SetLengthUnit_s(doc, 1 / UNITS_PER_METER[Unit.MM])
+    XCAFDoc_DocumentTool.SetLengthUnit_s(doc, metres_per_source_unit(source_length_unit))
     return doc
 
 
@@ -113,7 +124,7 @@ def quantity_color_rgba_from_color(color: object) -> object | None:
     return wrapped_rgba
 
 
-def _create_bin_xcaf_doc(to_export: Any) -> Any:
+def _create_bin_xcaf_doc(to_export: Any, *, source_length_unit: Unit | None = None) -> Any:
     import warnings
 
     from OCP.TopLoc import TopLoc_Location
@@ -131,7 +142,7 @@ def _create_bin_xcaf_doc(to_export: Any) -> Any:
         ta,
     )
 
-    doc = create_bin_xcaf_doc()
+    doc = create_bin_xcaf_doc(source_length_unit=source_length_unit)
     shape_tool = XCAFDoc_DocumentTool.ShapeTool_s(doc.Main())
     color_tool = XCAFDoc_DocumentTool.ColorTool_s(doc.Main())
     is_assembly = isinstance(to_export, Compound) and len(to_export.children) > 0
@@ -258,6 +269,7 @@ def export_xcaf_doc_step_scene(
     text_to_cad_entry_kind: str | None = None,
     source_path: str | None = None,
     source_hash: str | None = None,
+    source_length_unit: Unit | None = None,
     logger: object | None = None,
 ) -> LoadedStepScene:
     step_hash = write_xcaf_doc_step_file(
@@ -271,11 +283,15 @@ def export_xcaf_doc_step_scene(
         logger=logger,
     )
     with (logger.timed(f"load scene from XCAF {output_path.name}") if logger is not None else nullcontext()):
-        return load_step_scene_from_xcaf_doc(
+        scene = load_step_scene_from_xcaf_doc(
             output_path,
             doc,
             step_hash=step_hash,
         )
+    # The document already carries the unit; restating it on the scene is what
+    # lets the GLB writer stay in step without a second caller-supplied value.
+    scene.source_length_unit = source_length_unit
+    return scene
 
 
 def write_xcaf_doc_step_file(
@@ -356,8 +372,16 @@ def export_build123d_step_scene(
     text_to_cad_entry_kind: str | None = None,
     source_path: str | None = None,
     source_hash: str | None = None,
+    source_length_unit: Unit | None = None,
 ) -> LoadedStepScene:
-    doc = _create_bin_xcaf_doc(to_export)
+    """Write a STEP and return the scene, both tagged with the source unit.
+
+    ``source_length_unit`` declares the unit the caller's coordinates are in
+    (``None`` means ``Unit.MM``). It reaches the STEP through the XCAF document
+    and travels on the returned scene, so a GLB written from that scene uses
+    the same declaration rather than a second argument that could disagree.
+    """
+    doc = _create_bin_xcaf_doc(to_export, source_length_unit=source_length_unit)
     scene = export_xcaf_doc_step_scene(
         doc,
         output_path,
@@ -365,6 +389,7 @@ def export_build123d_step_scene(
         text_to_cad_entry_kind=text_to_cad_entry_kind,
         source_path=source_path,
         source_hash=source_hash,
+        source_length_unit=source_length_unit,
     )
     return _attach_assembly_mates(scene, to_export)
 
@@ -375,12 +400,14 @@ def build_build123d_step_scene(
     *,
     source_kind: str = "step",
     source_hash: str | None = None,
+    source_length_unit: Unit | None = None,
 ) -> LoadedStepScene:
-    doc = _create_bin_xcaf_doc(to_export)
+    doc = _create_bin_xcaf_doc(to_export, source_length_unit=source_length_unit)
     scene = load_step_scene_from_xcaf_doc(
         output_path,
         doc,
         source_kind=source_kind,
         source_hash=source_hash,
     )
+    scene.source_length_unit = source_length_unit
     return _attach_assembly_mates(scene, to_export)
